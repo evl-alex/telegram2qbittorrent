@@ -86,7 +86,12 @@ From an authorized Telegram account, DM the bot:
   `Where should this torrent be saved?` with one inline button per entry.
   Tap one → bot edits the message to `✅ Added to qBittorrent → <label>`.
 - If `save_paths.json` has exactly one entry, the picker is skipped and the
-  bot replies immediately with `✅ Added to qBittorrent`.
+  bot replies immediately with `✅ Added to qBittorrent → <label>`.
+- The same message then refreshes every ~10 seconds with live progress
+  (`📥 Downloading <name> → <label>` plus percent, speed, seeds, ETA),
+  and flips to `✅ <name> successfully downloaded to <label> in <elapsed>`
+  when the torrent finishes. Live updates are dropped if the bot restarts
+  mid-download; the torrent itself continues in qBittorrent.
 - On failure → bot replies `❌ Error: <details>`.
 
 Pending uploads are held in memory until the user picks a destination. If the
@@ -114,7 +119,7 @@ The service is enabled at install time, so it auto-starts on boot and auto-resta
 
 ### Updating to the latest version
 
-After pushing a change to GitHub from any dev machine:
+If project's GitHub repo has changes that you want to apply, run following script:
 
 ```bash
 ~/telegram2qbittorrent/deploy/update.sh

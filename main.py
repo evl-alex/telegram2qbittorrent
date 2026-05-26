@@ -3,10 +3,12 @@ import logging
 import os
 import secrets
 import tempfile
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 import qbittorrentapi
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -111,6 +113,64 @@ def _qb_add(**kwargs) -> None:
         raise RuntimeError(f"qBittorrent rejected the torrent: {result!r}")
 
 
+def _qb_torrents_info(**kwargs):
+    try:
+        return _qb.torrents_info(**kwargs)
+    except qbittorrentapi.Unauthorized401Error:
+        _qb.auth_log_in()
+        return _qb.torrents_info(**kwargs)
+
+
+def _snapshot_hashes() -> set[str]:
+    return {t.hash for t in _qb_torrents_info()}
+
+
+def _find_new_hash(before: set[str]) -> str | None:
+    for _ in range(3):
+        new = {t.hash for t in _qb_torrents_info()} - before
+        if len(new) == 1:
+            return next(iter(new))
+        if len(new) > 1:
+            return None
+        time.sleep(0.5)
+    return None
+
+
+def _format_bytes(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    value = float(num_bytes)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} PiB"
+
+
+def _format_speed(bytes_per_sec: int) -> str:
+    return f"{_format_bytes(bytes_per_sec)}/s"
+
+
+def _format_duration(seconds: int) -> str:
+    if seconds is None or seconds < 0 or seconds >= 8640000:
+        return "∞"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _truncate_name(name: str, max_len: int = 40) -> str:
+    if len(name) <= max_len:
+        return name
+    keep = max_len - 1
+    head = keep // 2 + keep % 2
+    tail = keep // 2
+    return f"{name[:head]}…{name[-tail:]}"
+
+
 def _picker_for(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup.from_column(
         [InlineKeyboardButton(label, callback_data=f"save|{token}|{idx}")
@@ -136,6 +196,107 @@ def _pending(context: ContextTypes.DEFAULT_TYPE) -> dict:
     return context.user_data.setdefault("pending", {})
 
 
+def _downloading_text(name: str, label: str, progress: float, dlspeed: int, num_seeds: int, eta: int) -> str:
+    return (
+        f"📥 Downloading {name} → {label}\n"
+        f"{int(progress * 100)}% - {_format_speed(dlspeed)} ({num_seeds} seeds) - {_format_duration(eta)}"
+    )
+
+
+async def _edit_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, text: str) -> bool:
+    try:
+        await context.bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id)
+        return True
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            return False
+        raise
+
+
+async def _status_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    job = context.job
+    assert job is not None and isinstance(job.data, dict)
+    data = job.data
+    torrent_hash: str = data["hash"]
+    chat_id: int = data["chat_id"]
+    message_id: int = data["message_id"]
+    label: str = data["label"]
+    name: str = data["name"]
+
+    try:
+        torrents = _qb_torrents_info(torrent_hashes=torrent_hash)
+    except Exception:
+        logging.exception("Failed to fetch torrent info for %s", torrent_hash)
+        return
+
+    if not torrents:
+        try:
+            await _edit_message(context, chat_id, message_id, f"⚠️ Torrent no longer in qBittorrent → {label}")
+        except Exception:
+            logging.exception("Failed to edit message for removed torrent %s", torrent_hash)
+        job.schedule_removal()
+        return
+
+    t = torrents[0]
+    if t.completion_on and t.completion_on > 0:
+        elapsed = max(0, int(t.completion_on - t.added_on))
+        text = f"✅ {name} ({_format_bytes(t.size)}) successfully downloaded to {label} in {_format_duration(elapsed)}"
+        try:
+            await _edit_message(context, chat_id, message_id, text)
+        except Exception:
+            logging.exception("Failed to edit completion message for %s", torrent_hash)
+        job.schedule_removal()
+        return
+
+    text = _downloading_text(name, label, t.progress, t.dlspeed, t.num_seeds, t.eta)
+    if text == data.get("last_text"):
+        return
+    try:
+        if await _edit_message(context, chat_id, message_id, text):
+            data["last_text"] = text
+    except Exception:
+        logging.exception("Failed to edit progress message for %s", torrent_hash)
+
+
+async def _start_monitor(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    torrent_hash: str,
+    label: str,
+) -> None:
+    if context.job_queue is None:
+        logging.warning("JobQueue unavailable; status monitoring disabled")
+        return
+
+    torrents = _qb_torrents_info(torrent_hashes=torrent_hash)
+    if not torrents:
+        return
+    raw_name = torrents[0].name or torrent_hash[:8]
+    name = _truncate_name(raw_name)
+
+    initial = _downloading_text(name, label, 0.0, 0, 0, -1)
+    try:
+        await _edit_message(context, chat_id, message_id, initial)
+    except Exception:
+        logging.exception("Failed to set initial status message for %s", torrent_hash)
+
+    context.job_queue.run_repeating(
+        _status_job,
+        interval=10,
+        first=10,
+        data={
+            "hash": torrent_hash,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "label": label,
+            "name": name,
+            "last_text": initial,
+        },
+        name=f"mon-{torrent_hash}",
+    )
+
+
 async def handle_torrent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorize_message(update):
         return
@@ -151,11 +312,15 @@ async def handle_torrent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await file.download_to_drive(tmp.name)
 
     if len(SAVE_PATHS) == 1:
-        _, save_path = SAVE_PATHS[0]
+        label, save_path = SAVE_PATHS[0]
         try:
+            before = _snapshot_hashes()
             _qb_add(torrent_files=tmp.name, save_path=save_path)
             logging.info("Torrent added by user %s: %s", user_id, file_name)
-            await update.message.reply_text("✅ Added to qBittorrent")
+            message = await update.message.reply_text(f"✅ Added to qBittorrent → {label}")
+            new_hash = _find_new_hash(before)
+            if new_hash:
+                await _start_monitor(context, message.chat_id, message.message_id, new_hash, label)
         except Exception as e:
             logging.exception("Failed to add torrent from user %s: %s", user_id, file_name)
             await update.message.reply_text(f"❌ Error: {e}")
@@ -185,11 +350,15 @@ async def handle_magnet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if len(SAVE_PATHS) == 1:
-        _, save_path = SAVE_PATHS[0]
+        label, save_path = SAVE_PATHS[0]
         try:
+            before = _snapshot_hashes()
             _qb_add(urls=text, save_path=save_path)
             logging.info("Magnet added by user %s: %s", user_id, text)
-            await update.message.reply_text("✅ Magnet added to qBittorrent")
+            message = await update.message.reply_text(f"✅ Magnet added to qBittorrent → {label}")
+            new_hash = _find_new_hash(before)
+            if new_hash:
+                await _start_monitor(context, message.chat_id, message.message_id, new_hash, label)
         except Exception as e:
             logging.exception("Failed to add magnet from user %s: %s", user_id, text)
             await update.message.reply_text(f"❌ Error: {e}")
@@ -235,6 +404,7 @@ async def handle_save_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     label, save_path = SAVE_PATHS[idx]
     try:
+        before = _snapshot_hashes()
         if entry["type"] == "file":
             _qb_add(torrent_files=entry["path"], save_path=save_path)
             logging.info("Torrent added by user %s to %s: %s", user_id, label, entry["name"])
@@ -243,6 +413,9 @@ async def handle_save_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             _qb_add(urls=entry["url"], save_path=save_path)
             logging.info("Magnet added by user %s to %s: %s", user_id, label, entry["url"])
             await query.edit_message_text(f"✅ Magnet added to qBittorrent → {label}")
+        new_hash = _find_new_hash(before)
+        if new_hash and query.message is not None:
+            await _start_monitor(context, query.message.chat.id, query.message.message_id, new_hash, label)
     except Exception as e:
         logging.exception("Failed to add upload from user %s to %s", user_id, label)
         await query.edit_message_text(f"❌ Error: {e}")
