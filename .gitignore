@@ -1,4 +1,5 @@
 venv/
 .env
+save_paths.json
 __pycache__/
 *.pyc

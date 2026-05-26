@@ -31,11 +31,12 @@ sudo apt install -y git
 git clone https://github.com/evl-alex/telegram2qbittorrent.git ~/telegram2qbittorrent
 cd ~/telegram2qbittorrent
 
-# First run: installs dependencies and scaffolds .env
+# First run: installs dependencies and scaffolds .env + save_paths.json
 ./deploy/install.sh
 
 # Fill in real values
 nano .env
+nano save_paths.json
 
 # Second run: installs the systemd unit and starts the service
 ./deploy/install.sh
@@ -54,9 +55,25 @@ nano .env
 | `QB_HOST` | Host where qBittorrent Web UI is reachable (e.g. `127.0.0.1` if same machine, or LAN IP). |
 | `QB_PORT` | qBittorrent Web UI port (default `8080`). |
 | `QB_USER` / `QB_PASS` | qBittorrent Web UI credentials. |
-| `DEFAULT_SAVE_PATH` | Path on the qBittorrent host where downloads should be saved (e.g. `/mnt/media/downloads`). |
 
 `.env` is gitignored — secrets stay on the server.
+
+Save destinations live in [`save_paths.json`](save_paths.example.json) — a JSON
+array of `{"label", "path"}` entries, in the order the buttons should appear.
+The file is gitignored, so edits survive `deploy/update.sh`. At least one entry
+is required; with exactly one entry the bot skips the picker and adds every
+torrent straight to that path.
+
+```json
+[
+  {"label": "TV Series",  "path": "/mnt/media/tv"},
+  {"label": "Movies",     "path": "/mnt/media/movies"},
+  {"label": "Downloads",  "path": "/mnt/media/downloads"}
+]
+```
+
+Adding a destination: append an entry and restart the service
+(`sudo systemctl restart telegram2qbittorrent`).
 
 ## Operation
 
@@ -64,9 +81,17 @@ nano .env
 
 From an authorized Telegram account, DM the bot:
 
-- Attach a `.torrent` file → bot replies `✅ Added to qBittorrent`
-- Paste a `magnet:` link → bot replies `✅ Magnet added to qBittorrent`
+- Attach a `.torrent` file or paste a `magnet:` link.
+- If `save_paths.json` has more than one entry, the bot replies
+  `Where should this torrent be saved?` with one inline button per entry.
+  Tap one → bot edits the message to `✅ Added to qBittorrent → <label>`.
+- If `save_paths.json` has exactly one entry, the picker is skipped and the
+  bot replies immediately with `✅ Added to qBittorrent`.
 - On failure → bot replies `❌ Error: <details>`.
+
+Pending uploads are held in memory until the user picks a destination. If the
+bot restarts before a button is tapped, the picker message will reply
+`⚠️ This upload expired, please re-send.`
 
 ### Viewing logs
 
@@ -115,9 +140,10 @@ Edit, commit, push. Then on the server: `deploy/update.sh`.
 
 ## Project layout
 
-- [`main.py`](main.py) — the bot itself (~150 lines).
+- [`main.py`](main.py) — the bot itself (~250 lines).
 - [`requirements.txt`](requirements.txt) — Python dependencies.
-- [`.env.example`](.env.example) — config template.
+- [`.env.example`](.env.example) — secrets/connection config template.
+- [`save_paths.example.json`](save_paths.example.json) — save-destination template.
 - [`deploy/install.sh`](deploy/install.sh) — first-time server setup.
 - [`deploy/update.sh`](deploy/update.sh) — pull + restart.
 - [`deploy/telegram2qbittorrent.service`](deploy/telegram2qbittorrent.service) — systemd unit template (placeholders substituted by `install.sh`).

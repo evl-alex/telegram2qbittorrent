@@ -21,15 +21,26 @@ fi
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
 
+SCAFFOLDED=0
 if [ ! -f .env ]; then
     cp .env.example .env
+    echo ".env created from template."
+    SCAFFOLDED=1
+fi
+if [ ! -f save_paths.json ]; then
+    cp save_paths.example.json save_paths.json
+    echo "save_paths.json created from template."
+    SCAFFOLDED=1
+fi
+if [ "$SCAFFOLDED" -eq 1 ]; then
     echo
-    echo ".env created from template. Edit it now, then re-run this script:"
+    echo "Edit the scaffolded config file(s), then re-run this script:"
     echo "  nano $REPO/.env"
+    echo "  nano $REPO/save_paths.json"
     exit 0
 fi
 
-if grep -qE '^(BOT_TOKEN|ALLOWED_USER_IDS|QB_HOST|QB_PORT|QB_USER|QB_PASS|DEFAULT_SAVE_PATH)=$' .env; then
+if grep -qE '^(BOT_TOKEN|ALLOWED_USER_IDS|QB_HOST|QB_PORT|QB_USER|QB_PASS)=$' .env; then
     echo
     echo "Some required values in .env are still empty. Fill them in, then re-run." >&2
     exit 1

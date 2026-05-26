@@ -1,0 +1,5 @@
+[
+  {"label": "TV Series",  "path": "/mnt/media/tv"},
+  {"label": "Movies",     "path": "/mnt/media/movies"},
+  {"label": "Downloads",  "path": "/mnt/media/downloads"}
+]
