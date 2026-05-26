@@ -75,7 +75,7 @@ async def _authorize(update: Update) -> bool:
     if update.message is None or update.effective_user is None:
         return False
     if update.effective_user.id not in ALLOWED_USER_IDS:
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("Unauthorized")
         return False
     return True
 
@@ -95,7 +95,7 @@ async def handle_torrent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             _qb_add(torrent_files=tmp.name, save_path=SAVE_PATH)
             logging.info("Torrent added by user %s: %s", user_id, file_name)
-            await update.message.reply_text("✅ Added to qBittorrent.")
+            await update.message.reply_text("✅ Added to qBittorrent")
         except Exception as e:
             logging.exception("Failed to add torrent from user %s: %s", user_id, file_name)
             await update.message.reply_text(f"❌ Error: {e}")
@@ -113,13 +113,13 @@ async def handle_magnet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     text = update.message.text.strip()
     if not text.startswith("magnet:"):
-        await update.message.reply_text("Send a .torrent file or a magnet link.")
+        await update.message.reply_text("Send a .torrent file or a magnet link")
         return
 
     try:
         _qb_add(urls=text, save_path=SAVE_PATH)
         logging.info("Magnet added by user %s: %s", user_id, text)
-        await update.message.reply_text("✅ Magnet added to qBittorrent.")
+        await update.message.reply_text("✅ Magnet added to qBittorrent")
     except Exception as e:
         logging.exception("Failed to add magnet from user %s: %s", user_id, text)
         await update.message.reply_text(f"❌ Error: {e}")
